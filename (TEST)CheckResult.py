@@ -1,6 +1,8 @@
 from __future__ import division
 from __future__ import print_function
 
+import numpy
+
 import time
 import argparse
 import pickle
@@ -105,8 +107,9 @@ else:
     print("WARNING: No save_folder provided!" +
           "Testing (within this script) will throw an error.")
 
+
 train_loader, valid_loader, test_loader, loc_max, loc_min, vel_max, vel_min = load_data(
-    args.batch_size, args.suffix)
+    32, "_springs5")
 
 # Generate off-diagonal interaction graph
 off_diag = np.ones([args.num_atoms, args.num_atoms]) - np.eye(args.num_atoms)
@@ -182,122 +185,6 @@ if args.cuda:
 rel_rec = Variable(rel_rec)
 rel_send = Variable(rel_send)
 
-
-def train(epoch, best_val_loss):
-    t = time.time()
-    nll_train = []
-    acc_train = []
-    kl_train = []
-    mse_train = []
-
-    encoder.train()
-    decoder.train()
-    scheduler.step()
-    for batch_idx, (data, relations) in enumerate(train_loader):
-
-        if args.cuda:
-            data, relations = data.cuda(), relations.cuda()
-        data, relations = Variable(data), Variable(relations)
-
-        optimizer.zero_grad()
-
-        logits = encoder(data, rel_rec, rel_send)
-        edges = gumbel_softmax(logits, tau=args.temp, hard=args.hard)
-        prob = my_softmax(logits, -1)
-
-        if args.decoder == 'rnn':
-            output = decoder(data, edges, rel_rec, rel_send, 100,
-                             burn_in=True,
-                             burn_in_steps=args.timesteps - args.prediction_steps)
-        else:
-            output = decoder(data, edges, rel_rec, rel_send,
-                             args.prediction_steps)
-
-        target = data[:, :, 1:, :]
-
-        loss_nll = nll_gaussian(output, target, args.var)
-
-        if args.prior:
-            loss_kl = kl_categorical(prob, log_prior, args.num_atoms)
-        else:
-            loss_kl = kl_categorical_uniform(prob, args.num_atoms,
-                                             args.edge_types)
-
-        loss = loss_nll + loss_kl
-
-        acc = edge_accuracy(logits, relations)
-        acc_train.append(acc)
-
-        loss.backward()
-        optimizer.step()
-
-        # mse_train.append(F.mse_loss(output, target).data[0])
-        # nll_train.append(loss_nll.data[0])
-        # kl_train.append(loss_kl.data[0])
-        mse_train.append(F.mse_loss(output, target).data.item()) #[Jiaqi Note] Avoid IndexError for 0-dim tensor
-        nll_train.append(loss_nll.data.item()) #[Jiaqi Note] Avoid IndexError for 0-dim tensor
-        kl_train.append(loss_kl.data.item())#[Jiaqi Note] Avoid IndexError for 0-dim tensor
-
-    nll_val = []
-    acc_val = []
-    kl_val = []
-    mse_val = []
-
-    encoder.eval()
-    decoder.eval()
-    for batch_idx, (data, relations) in enumerate(valid_loader):
-        if args.cuda:
-            data, relations = data.cuda(), relations.cuda()
-        data, relations = Variable(data, volatile=True), Variable(
-            relations, volatile=True)
-
-        logits = encoder(data, rel_rec, rel_send)
-        edges = gumbel_softmax(logits, tau=args.temp, hard=True)
-        prob = my_softmax(logits, -1)
-
-        # validation output uses teacher forcing
-        output = decoder(data, edges, rel_rec, rel_send, 1)
-
-        target = data[:, :, 1:, :]
-        loss_nll = nll_gaussian(output, target, args.var)
-        loss_kl = kl_categorical_uniform(prob, args.num_atoms, args.edge_types)
-
-        acc = edge_accuracy(logits, relations)
-        acc_val.append(acc)
-
-        # mse_val.append(F.mse_loss(output, target).data[0])
-        # nll_val.append(loss_nll.data[0])
-        # kl_val.append(loss_kl.data[0])
-        mse_val.append(F.mse_loss(output, target).data.item()) #[Jiaqi Note] Avoid IndexError for 0-dim tensor
-        nll_val.append(loss_nll.data.item()) #[Jiaqi Note] Avoid IndexError for 0-dim tensor
-        kl_val.append(loss_kl.data.item()) #[Jiaqi Note] Avoid IndexError for 0-dim tensor
-
-    print('Epoch: {:04d}'.format(epoch),
-          'nll_train: {:.10f}'.format(np.mean(nll_train)),
-          'kl_train: {:.10f}'.format(np.mean(kl_train)),
-          'mse_train: {:.10f}'.format(np.mean(mse_train)),
-          'acc_train: {:.10f}'.format(np.mean(acc_train)),
-          'nll_val: {:.10f}'.format(np.mean(nll_val)),
-          'kl_val: {:.10f}'.format(np.mean(kl_val)),
-          'mse_val: {:.10f}'.format(np.mean(mse_val)),
-          'acc_val: {:.10f}'.format(np.mean(acc_val)),
-          'time: {:.4f}s'.format(time.time() - t))
-    if args.save_folder and np.mean(nll_val) < best_val_loss:
-        torch.save(encoder.state_dict(), encoder_file)
-        torch.save(decoder.state_dict(), decoder_file)
-        print('Best model so far, saving...')
-        print('Epoch: {:04d}'.format(epoch),
-              'nll_train: {:.10f}'.format(np.mean(nll_train)),
-              'kl_train: {:.10f}'.format(np.mean(kl_train)),
-              'mse_train: {:.10f}'.format(np.mean(mse_train)),
-              'acc_train: {:.10f}'.format(np.mean(acc_train)),
-              'nll_val: {:.10f}'.format(np.mean(nll_val)),
-              'kl_val: {:.10f}'.format(np.mean(kl_val)),
-              'mse_val: {:.10f}'.format(np.mean(mse_val)),
-              'acc_val: {:.10f}'.format(np.mean(acc_val)),
-              'time: {:.4f}s'.format(time.time() - t), file=log)
-        log.flush()
-    return np.mean(nll_val)
 
 
 def test():
@@ -394,22 +281,29 @@ def test():
         log.flush()
 
 
-# Train model
-t_total = time.time()
-best_val_loss = np.inf
-best_epoch = 0
-for epoch in range(args.epochs):
-    val_loss = train(epoch, best_val_loss)
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        best_epoch = epoch
-print("Optimization Finished!")
-print("Best Epoch: {:04d}".format(best_epoch))
-if args.save_folder:
-    print("Best Epoch: {:04d}".format(best_epoch), file=log)
-    log.flush()
+def predict():
+    encoder.eval()
+    decoder.eval()
+    encoder.load_state_dict(torch.load(encoder_file))
+    decoder.load_state_dict(torch.load(decoder_file))
+    for batch_idx, (data, relations) in enumerate(valid_loader):
+        if args.cuda:
+            data, relations = data.cuda(), relations.cuda()
+        data, relations = Variable(data, volatile=True), Variable(
+            relations, volatile=True)
 
-test()
-if log is not None:
-    print(save_folder)
-    log.close()
+        logits = encoder(data, rel_rec, rel_send)
+        edges = gumbel_softmax(logits, tau=args.temp, hard=args.hard)
+        prob = my_softmax(logits, -1)
+
+        if args.decoder == 'rnn':
+            output = decoder(data, edges, rel_rec, rel_send, 100,
+                             burn_in=True,
+                             burn_in_steps=args.timesteps - args.prediction_steps)
+        else:
+            output = decoder(data, edges, rel_rec, rel_send,
+                             args.prediction_steps)
+        target = data[:, :, 1:, :]
+        print()
+
+predict()
